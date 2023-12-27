@@ -6,6 +6,9 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+
+	"github.com/olivere/elastic/v7"
+	"github.com/pborman/uuid"
 )
 
 type Location struct {
@@ -21,6 +24,9 @@ type Post struct {
 
 const (
 	DISTANCE = "200km"
+	TYPE     = "post"
+	INDEX    = "around"
+	ES_URL   = "http://34.16.149.26:9200"
 )
 
 func main() {
@@ -38,7 +44,29 @@ func handlerPost(w http.ResponseWriter, r *http.Request) {
 	if err := decoder.Decode(&p); err != nil {
 		panic(err)
 	}
-	fmt.Fprintf(w, "Post, received: %s\n", p.Message)
+	id := uuid.New()
+	saveToES(&p, id)
+}
+
+func saveToES(p *Post, id string) {
+	es_client, err := elastic.NewClient(elastic.SetURL(ES_URL), elastic.SetSniff(false))
+	if err != nil {
+		panic(err)
+	}
+
+	_, err = es_client.
+		Index().
+		Index(INDEX).
+		Type(TYPE).
+		Id(id).
+		BodyJson(p).
+		Refresh("wait_for").
+		Do()
+
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("Post is saved to index: %s\n", p.Message)
 }
 
 func handlerSearch(w http.ResponseWriter, r *http.Request) {
@@ -51,20 +79,39 @@ func handlerSearch(w http.ResponseWriter, r *http.Request) {
 		ran = val + "km"
 	}
 
-	fmt.Println("range is ", ran)
+	fmt.Printf("Search received: %f %f %s\n", lat, lon, ran)
 
-	p := &Post{
-		User:     "1111",
-		Message:  "Top 100 places to visit",
-		Location: Location{Lat: lat, Lon: lon},
-	}
-
-	js, err := json.Marshal(p)
+	//create a client
+	client, err := elastic.NewClient(elastic.SetURL(ES_URL), elastic.SetSniff(false))
 	if err != nil {
 		panic(err)
-		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(js)
+	exists, err := client.IndexExists(INDEX).Do()
+	if err != nil {
+		panic(err)
+	}
+	if !exists {
+		mapping := `{
+			"mappings":{
+				"post":{
+					"properties":{
+						"location":{
+							"type":"geo_point"
+						}
+					}
+				}
+			}
+		}`
+		_, err := client.CreateIndex(INDEX).Body(mapping).Do()
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	fmt.Println("started-service")
+	http.HandleFunc("/post", handlerPost)
+	http.HandleFunc("/search", handlerSearch)
+	log.Fatal(http.ListenAndServe(":8080", nil))
+
 }
